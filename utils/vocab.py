@@ -33,6 +33,9 @@ class Vocab(object):
             return self._reverse_vocab_dict.get(id_, self.unk_word)
         return self._reverse_vocab_dict[id_]
 
+    def __len__(self):
+        return len(self._vocab_dict)
+
 
 class TransVocab(Vocab):
 

@@ -2,7 +2,6 @@ import random
 
 import torch
 import jsonlines
-from nltk import word_tokenize
 
 
 class SNLIReader(object):
@@ -22,47 +21,45 @@ class SNLIReader(object):
 
     @staticmethod
     def _convert_parse(parse):
-        tokens = parse.split()
+        parse_tokens = parse.lower().split()
+        word_tokens = []
         transition = []
-        for token in tokens:
-            if token == ')':
+        for parse_token in parse_tokens:
+            if parse_token == ')':
                 transition.append('REDUCE')
-            elif token == '(':
+            elif parse_token == '(':
                 continue
             else:
                 transition.append('SHIFT')
-        return transition
+                word_tokens.append(parse_token)
+        return word_tokens, transition
 
     def _convert_obj(self, obj):
-        pre = obj['sentence1']
         pre_parse = obj['sentence1_binary_parse']
-        hyp = obj['sentence2']
         hyp_parse = obj['sentence2_binary_parse']
         label = obj['gold_label']
         if label == '-':
             return None
-        pre_tokens = [self.token_vocab.word_to_id(w)
-                      for w in word_tokenize(pre.lower())]
-        pre_trans = [self.trans_vocab.word_to_id(w)
-                     for w in self._convert_parse(pre_parse)]
-        hyp_tokens = [self.token_vocab.word_to_id(w)
-                      for w in word_tokenize(hyp.lower())]
-        hyp_trans = [self.trans_vocab.word_to_id(w)
-                     for w in self._convert_parse(hyp_parse)]
+        pre_tokens, pre_trans = self._convert_parse(pre_parse)
+        hyp_tokens, hyp_trans = self._convert_parse(hyp_parse)
+        pre_tokens = [self.token_vocab.word_to_id(w) for w in pre_tokens]
+        pre_trans = [self.trans_vocab.word_to_id(w) for w in pre_trans]
+        hyp_tokens = [self.token_vocab.word_to_id(w) for w in hyp_tokens]
+        hyp_trans = [self.trans_vocab.word_to_id(w) for w in hyp_trans]
         label = self.label_vocab.word_to_id(label)
-        if (len(pre_tokens) > self._max_length
-                or len(hyp_tokens) > self._max_length):
-            return None
+        if self._max_length:
+            if (len(pre_tokens) > self._max_length
+                    or len(hyp_tokens) > self._max_length):
+                return None
         return {'pre_tokens': pre_tokens, 'pre_trans': pre_trans,
                 'hyp_tokens': hyp_tokens, 'hyp_trans': hyp_trans,
                 'label': label}
 
     def _preprocess_batch(self, batch):
-        max_trans_length = self._max_length*2 - 1
         shift_id = self.trans_vocab.word_to_id('SHIFT')
         pad_id = self.token_vocab.pad_id
 
-        def pad(tokens, trans):
+        def pad(tokens, trans, max_trans_length):
             num_shift_added = max_trans_length - len(trans)
             left_trans_pad = [shift_id] * num_shift_added
             trans = left_trans_pad + trans
@@ -75,6 +72,8 @@ class SNLIReader(object):
         preprocessed = {'pre_tokens': [], 'pre_trans': [], 'pre_num_trans': [],
                         'hyp_tokens': [], 'hyp_trans': [], 'hyp_num_trans': [],
                         'label': []}
+        pre_max_trans_length = max(len(d['pre_trans']) for d in batch)
+        hyp_max_trans_length = max(len(d['hyp_trans']) for d in batch)
         for d in batch:
             pre_tokens = d['pre_tokens']
             pre_trans = d['pre_trans']
@@ -83,8 +82,10 @@ class SNLIReader(object):
             hyp_trans = d['hyp_trans']
             hyp_num_trans = len(hyp_trans)
             label = d['label']
-            pre_tokens, pre_trans = pad(tokens=pre_tokens, trans=pre_trans)
-            hyp_tokens, hyp_trans = pad(tokens=hyp_tokens, trans=hyp_trans)
+            pre_tokens, pre_trans = pad(tokens=pre_tokens, trans=pre_trans,
+                                        max_trans_length=pre_max_trans_length)
+            hyp_tokens, hyp_trans = pad(tokens=hyp_tokens, trans=hyp_trans,
+                                        max_trans_length=hyp_max_trans_length)
             preprocessed['pre_tokens'].append(pre_tokens)
             preprocessed['pre_trans'].append(pre_trans)
             preprocessed['pre_num_trans'].append(pre_num_trans)
@@ -107,3 +108,6 @@ class SNLIReader(object):
             batch = self._data[i:i+batch_size]
             batch = self._preprocess_batch(batch)
             yield batch
+
+    def __len__(self):
+        return len(self._data)
