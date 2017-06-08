@@ -180,8 +180,7 @@ def main():
                 cur_progress = (
                     epoch_num + (iter_cnt*batch_size / len(train_data_reader)))
                 logging.info(f'* epoch {cur_progress:.2f}: validation starts')
-                log_summary(progress=cur_progress, summary=train_summary,
-                            name='train')
+                log_summary(summary=train_summary, name='train')
                 valid_batch_it = valid_data_reader.batch_iterator(batch_size)
                 valid_summary = {'loss_sum': 0.0, 'accuracy_sum': 0.0,
                                  'denom': 0}
@@ -196,8 +195,7 @@ def main():
                     valid_summary['accuracy_sum'] / valid_summary['denom'])
                 plot_summary(loss=valid_loss, accuracy=valid_accuracy,
                              train=False)
-                log_summary(progress=cur_progress, summary=valid_summary,
-                            name='valid')
+                log_summary(summary=valid_summary, name='valid')
                 model_filename = (f'model-{global_iter_cnt}'
                                   f'-{valid_loss}-{valid_accuracy}.pkl')
                 model_path = os.path.join(save_dir, model_filename)
