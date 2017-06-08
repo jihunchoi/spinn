@@ -34,7 +34,7 @@ class NLIModel(nn.Module):
 
     def __init__(self, num_words, word_dim, hidden_dim, tracking_dim,
                  clf_hidden_dim, clf_num_layers, shift_id, reduce_id,
-                 initial_word_embedding=None, tune_word_embedding=True):
+                 initial_word_embedding=None):
         super(NLIModel, self).__init__()
         self.word_dim = word_dim
         self.hidden_dim = hidden_dim
@@ -43,7 +43,6 @@ class NLIModel(nn.Module):
         self.clf_num_layers = clf_num_layers
         self.shift_id = shift_id
         self.reduce_id = reduce_id
-        self.tune_word_embedding = tune_word_embedding
 
         self.word_embedding = nn.Embedding(
             num_embeddings=num_words, embedding_dim=word_dim)
@@ -56,6 +55,7 @@ class NLIModel(nn.Module):
         self.reset_parameters()
         if initial_word_embedding is not None:
             self.word_embedding.weight.data.copy_(initial_word_embedding)
+            self.word_embedding.weight.requires_grad = False
 
     def reset_parameters(self):
         init.normal(self.word_embedding.weight.data, mean=0, std=0.01)

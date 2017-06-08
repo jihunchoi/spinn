@@ -75,8 +75,7 @@ def main():
         clf_num_layers=clf_num_layers,
         shift_id=trans_vocab.word_to_id('SHIFT'),
         reduce_id=trans_vocab.word_to_id('REDUCE'),
-        initial_word_embedding=initial_word_embedding,
-        tune_word_embedding=True)
+        initial_word_embedding=initial_word_embedding)
     if use_gpu:
         model.cuda()
     trainable_params = [p for p in model.parameters() if p.requires_grad]
