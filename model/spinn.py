@@ -148,7 +148,6 @@ class SPINN(nn.Module):
         tracker_state = None
         trans_logits = []
         for i in range(num_trans):
-            # TODO: Add losses from transition predictions to the loss value
             tracking, tracker_state = self.compute_tracking(
                 buffer=buffer, stack=stack, tracker_state=tracker_state)
             tr_i_logits = self.trans_linear(tracking)

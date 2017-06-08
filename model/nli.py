@@ -54,7 +54,7 @@ class NLIModel(nn.Module):
             input_dim=hidden_dim, hidden_dim=clf_hidden_dim,
             num_layers=clf_num_layers)
         self.reset_parameters()
-        if initial_word_embedding:
+        if initial_word_embedding is not None:
             self.word_embedding.weight.data.copy_(initial_word_embedding)
 
     def reset_parameters(self):

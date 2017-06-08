@@ -21,6 +21,22 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s %(levelname)-8s %(message)s')
 
 
+def load_glove(path, vocab, word_dim):
+    embedding_matrix_array = np.zeros([len(vocab), word_dim], dtype=np.float32)
+    glove_file = open(path, 'r', encoding='latin1')
+    for line in glove_file:
+        word, *values = line.split()
+        if word == '_':  # UNK
+            word_id = vocab.unk_id
+        elif vocab.has_word(word):
+            word_id = vocab.word_to_id(word)
+        else:
+            continue
+        embedding_matrix_array[word_id] = [float(v) for v in values]
+    glove_file.close()
+    return torch.FloatTensor(embedding_matrix_array)
+
+
 def main():
     word_dim = args.word_dim
     hidden_dim = args.hidden_dim
@@ -32,6 +48,7 @@ def main():
     batch_size = args.batch_size
     max_epoch = args.max_epoch
     trans_loss_weight = args.trans_loss_weight
+    glove_path = args.glove
     use_gpu = args.gpu
     save_dir = args.save_dir
     visdom_server = args.visdom_server
@@ -48,20 +65,23 @@ def main():
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
+    initial_word_embedding = None
+    if glove_path:
+        initial_word_embedding = load_glove(
+            path=glove_path, vocab=token_vocab, word_dim=word_dim)
     model = NLIModel(
         num_words=len(token_vocab), word_dim=word_dim, hidden_dim=hidden_dim,
         tracking_dim=tracking_dim, clf_hidden_dim=clf_hidden_dim,
         clf_num_layers=clf_num_layers,
         shift_id=trans_vocab.word_to_id('SHIFT'),
         reduce_id=trans_vocab.word_to_id('REDUCE'),
-        initial_word_embedding=None,
+        initial_word_embedding=initial_word_embedding,
         tune_word_embedding=True)
     if use_gpu:
         model.cuda()
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = optim.Adam(params=trainable_params)
     global_iter_cnt = 0
-    # TODO: Implement logic to use GloVe pretrained embeddings
 
     vis = Visdom(server=visdom_server, port=visdom_port, env=visdom_env)
     loss_win = None
@@ -96,7 +116,7 @@ def main():
                 X=np.array([global_iter_cnt]), Y=accuracy, win=accuracy_win,
                 name=name)
 
-    def log_summary(progress, summary, name):
+    def log_summary(summary, name):
         avg_loss = summary['loss_sum'] / summary['denom']
         avg_accuracy = summary['accuracy_sum'] / summary['denom']
         logging.info(f'- {name} loss: {avg_loss:.5f}')
@@ -212,6 +232,8 @@ if __name__ == '__main__':
                         help='maximum epoch')
     parser.add_argument('--trans-loss-weight', type=float, required=True,
                         help='weight of transition loss')
+    parser.add_argument('--glove', default=None,
+                        help='GloVe pretrained file path')
     parser.add_argument('--gpu', default=False, action='store_true',
                         help='whether to use GPU for computation')
     parser.add_argument('--save-dir', required=True,
