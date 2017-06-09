@@ -121,9 +121,10 @@ class SPINN(nn.Module):
     @staticmethod
     def _push_to_queue(queue, cursor, value):
         batch_size = queue.size(0)
-        value = Variable(queue.data.new(batch_size, 1).fill_(value))
+        value_expand = Variable(queue.data.new(batch_size, 1).fill_(value + 2))
         cursor_expand = cursor.unsqueeze(1)
-        new_queue = queue.scatter(dim=1, index=cursor_expand, source=value)
+        new_queue = queue.scatter(dim=1, index=cursor_expand,
+                                  source=value_expand)
         new_cursor = cursor + 1
         return new_queue, new_cursor
 
