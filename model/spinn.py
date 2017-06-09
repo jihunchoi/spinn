@@ -1,6 +1,5 @@
 """
-Some of the codes are copied from
-https://github.com/jekbradbury/examples/blob/spinn/snli/spinn.py.
+SPINN implementation that uses thin stack algorithm.
 """
 
 import torch
@@ -9,23 +8,6 @@ from torch.autograd import Variable
 from torch.nn import init
 
 from . import basic
-
-
-def bundle_state(var_list):
-    """Bundle a list of variables of size (2 * hidden_dim) into
-    a tuple of two variables (h, c), each of which is of size
-    (batch_size, hidden_dim).
-    """
-
-    stacked = torch.stack(var_list, dim=0)
-    h, c = torch.chunk(stacked, chunks=2, dim=1)
-    return h, c
-
-
-def unbundle_state(h, c):
-    """The inverse operation of bundle_state."""
-    hc = torch.cat([h, c], dim=1)
-    return list(torch.unbind(hc, dim=0))
 
 
 class Reducer(nn.Module):
@@ -82,8 +64,6 @@ class SPINN(nn.Module):
         self.tracker_cell = nn.LSTMCell(
             input_size=3 * hidden_dim, hidden_size=tracking_dim)
         self.trans_linear = nn.Linear(in_features=tracking_dim, out_features=2)
-        self.stack_zero_elem = nn.Parameter(torch.FloatTensor(2 * hidden_dim),
-                                            requires_grad=False)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -96,24 +76,148 @@ class SPINN(nn.Module):
         init.constant(self.tracker_cell.bias_hh.data, val=0)
         init.kaiming_normal(self.trans_linear.weight.data)
         init.constant(self.trans_linear.bias.data, val=0)
-        init.constant(self.stack_zero_elem.data, val=0)
 
-    def compute_tracking(self, buffer, stack, tracker_state=None):
-        buffer_top_h, _ = bundle_state([buf_batch[0] for buf_batch in buffer])
-        stack_left_h, _ = bundle_state([st_batch[-2] for st_batch in stack])
-        stack_right_h, _ = bundle_state([st_batch[-1] for st_batch in stack])
-        batch_size = len(buffer)
+    def compute_tracking(self, stack, buffer, buffer_cursor,
+                         queue, queue_cursor, tracker_state):
+        buffer_top, _ = SPINN._pop_from_buffer(
+            buffer=buffer, cursor=buffer_cursor)
+        right_ind, new_queue_cursor = SPINN._pop_from_queue(
+            queue=queue, cursor=queue_cursor)
+        left_ind, _ = SPINN._pop_from_queue(
+            queue=queue, cursor=new_queue_cursor)
+        right = SPINN._get_from_stack(stack=stack, index=right_ind)
+        left = SPINN._get_from_stack(stack=stack, index=left_ind)
+        right_h, _ = right.chunk(2, dim=1)
+        left_h, _ = left.chunk(2, dim=1)
+        buffer_top_h, _ = buffer_top.chunk(2, dim=1)
+        batch_size = buffer_top_h.size(0)
         if not tracker_state:
             zero_state = Variable(
                 buffer_top_h.data.new(batch_size, self.tracking_dim).zero_())
             tracker_state = (zero_state, zero_state)
-        tracker_cell_input = torch.cat(
-            [buffer_top_h, stack_left_h, stack_right_h], dim=1)
+        tracker_cell_input = torch.cat([buffer_top_h, left_h, right_h], dim=1)
         tracker_state_h, tracker_state_c = self.tracker_cell(
             input=tracker_cell_input, hx=tracker_state)
         tracking = tracker_state_h
         tracker_state_new = (tracker_state_h, tracker_state_c)
         return tracking, tracker_state_new
+
+    @staticmethod
+    def _pop_from_buffer(buffer, cursor):
+        batch_size, _, buffer_dim = buffer.size()
+        cursor_expand = (cursor.unsqueeze(1).unsqueeze(2)
+                         .expand(batch_size, 1, buffer_dim))
+        popped = buffer.gather(dim=1, index=cursor_expand).squeeze(1)
+        new_cursor = cursor + 1
+        return popped, new_cursor
+
+    @staticmethod
+    def _pop_from_queue(queue, cursor):
+        cursor_expand = cursor.unsqueeze(1)
+        popped = queue.gather(dim=1, index=cursor_expand - 1).squeeze(1)
+        new_cursor = cursor - 1
+        return popped, new_cursor
+
+    @staticmethod
+    def _push_to_queue(queue, cursor, value):
+        batch_size = queue.size(0)
+        value = Variable(queue.data.new(batch_size, 1).fill_(value))
+        cursor_expand = cursor.unsqueeze(1)
+        new_queue = queue.scatter(dim=1, index=cursor_expand, source=value)
+        new_cursor = cursor + 1
+        return new_queue, new_cursor
+
+    @staticmethod
+    def _get_from_stack(stack, index):
+        batch_size, _, stack_dim = stack.size()
+        index_expand = (index.unsqueeze(1).unsqueeze(2)
+                        .expand(batch_size, 1, stack_dim))
+        return stack.gather(dim=1, index=index_expand).squeeze(1)
+
+    @staticmethod
+    def _write_to_stack(stack, time, value):
+        # Write to time + 2, since the first two time steps of the stack
+        # are dummy.
+        batch_size, _, stack_dim = stack.size()
+        index_tensor = (stack.data.new(batch_size, 1, stack_dim).long()
+                        .fill_(time + 2))
+        index = Variable(index_tensor)
+        value_expand = value.unsqueeze(1)
+        return stack.scatter(dim=1, index=index, source=value_expand)
+
+    def step(self, time, action, stack, buffer, buffer_cursor,
+             queue, queue_cursor, tracking):
+        """
+        Args:
+            time (int): The current time step value.
+            action (Variable): A long variable with shape
+                (batch_size,), which contains the transition action
+                of each sequence in a batch.
+            stack (Variable): A float variable with shape
+                (batch_size, num_transitions + 2, 2 * hidden_dim), which
+                indicates the stack.
+            buffer (Variable): A float variable with shape
+                (batch_size, num_transitions, 2 * hidden_dim), which
+                indicates the buffer.
+            buffer_cursor (Variable): A long variable with shape
+                (batch_size,), which contains the current top indices
+                of the buffer.
+            queue (Variable): A long variable with shape
+                (batch_size, num_transitions + 2), which contains back
+                pointers to the stack.
+            queue_cursor (Variable): A long variable with shape
+                (batch_size,), which contains the current end indices
+                of the queue.
+            tracking (Variable): A float variable with shape
+                (batch, tracking_dim), which contains the tracker RNN
+                output.
+        """
+
+        # buffer_top: (batch_size, 2 * hidden_dim)
+        buffer_top, new_buffer_cursor = SPINN._pop_from_buffer(
+            buffer=buffer, cursor=buffer_cursor)
+
+        # 1. Compute stack, buffer cursor, queue cursor after shift
+        stack_shift = SPINN._write_to_stack(
+            stack=stack, time=time, value=buffer_top)
+        queue_cursor_shift = queue_cursor
+        buffer_cursor_shift = new_buffer_cursor
+
+        # 2. Compute stack, buffer cursor, queue cursor after reduce
+        right_ind, new_queue_cursor = SPINN._pop_from_queue(
+            queue=queue, cursor=queue_cursor)
+        left_ind, new_queue_cursor = SPINN._pop_from_queue(
+            queue=queue, cursor=new_queue_cursor)
+        right = SPINN._get_from_stack(stack=stack, index=right_ind)
+        left = SPINN._get_from_stack(stack=stack, index=left_ind)
+        right_h, right_c = right.chunk(2, dim=1)
+        left_h, left_c = left.chunk(2, dim=1)
+        parent_h, parent_c = self.reducer(
+            left_h=left_h, left_c=left_c, right_h=right_h, right_c=right_c,
+            tracking=tracking)
+        parent = torch.cat([parent_h, parent_c], dim=1)
+        stack_reduce = SPINN._write_to_stack(
+            stack=stack, time=time, value=parent)
+        queue_cursor_reduce = new_queue_cursor
+        buffer_cursor_reduce = buffer_cursor
+
+        # 3. Merge shift and reduce results depending on the transition action
+        reduce_mask = torch.eq(action, self.reduce_id)
+        reduce_mask_cursor = reduce_mask.long()
+        reduce_mask_stack = (reduce_mask.float().unsqueeze(1).unsqueeze(2)
+                             .expand_as(stack))
+        new_queue_cursor = ((1 - reduce_mask_cursor) * queue_cursor_shift
+                            + reduce_mask_cursor * queue_cursor_reduce)
+        new_buffer_cursor = ((1 - reduce_mask_cursor) * buffer_cursor_shift
+                             + reduce_mask_cursor * buffer_cursor_reduce)
+        new_stack = ((1 - reduce_mask_stack) * stack_shift
+                     + reduce_mask_stack * stack_reduce)
+
+        # 4. Update queue
+        new_queue, new_queue_cursor = SPINN._push_to_queue(
+            queue=queue, cursor=new_queue_cursor, value=time)
+
+        return new_stack, new_buffer_cursor, new_queue, new_queue_cursor
 
     def forward(self, tokens, trans=None):
         """
@@ -134,52 +238,41 @@ class SPINN(nn.Module):
                 (batch_size, num_transitions, 2).
         """
 
-        tokens = basic.apply_nd(fn=self.word_linear, input_=tokens)
-        # buffer: A list containing buffer elements of each batch
-        # stack: A list which would be used for stack of each batch
-        buffer = [list(torch.unbind(tokens_in_batch, dim=0))
-                  for tokens_in_batch in torch.unbind(tokens, dim=0)]
-        stack = [[self.stack_zero_elem, self.stack_zero_elem]
-                 for _ in range(len(buffer))]
+        batch_size = tokens.size(0)
         if trans:
             num_trans = trans.size(1)
         else:
-            num_trans = 2*tokens.size(1) - 1
+            num_trans = tokens.size(1)*2 - 1
+        hidden_dim = self.hidden_dim
+
+        # Initialize data structures
+        buffer = basic.apply_nd(fn=self.word_linear, input_=tokens)
+        # Prepend two dummy timesteps to stack and queue
+        stack = Variable(
+            buffer.data.new(batch_size, num_trans + 2, 2 * hidden_dim).zero_())
+        queue = Variable(
+            trans.data.new(batch_size, num_trans + 2).zero_())
+        buffer_cursor = Variable(trans.data.new(batch_size).zero_())
+        queue_cursor = Variable(trans.data.new(batch_size).fill_(2))
         tracker_state = None
         trans_logits = []
-        for i in range(num_trans):
+        for t in range(num_trans):
             tracking, tracker_state = self.compute_tracking(
-                buffer=buffer, stack=stack, tracker_state=tracker_state)
-            tr_i_logits = self.trans_linear(tracking)
-            trans_logits.append(tr_i_logits)
+                stack=stack, buffer=buffer, buffer_cursor=buffer_cursor,
+                queue=queue, queue_cursor=queue_cursor,
+                tracker_state=tracker_state)
+            trans_logits_t = self.trans_linear(tracking)
+            trans_logits.append(trans_logits_t)
             if trans:
-                tr_i = trans[:, i].data
+                action_t = trans[:, t]
             else:
-                tr_i = tr_i_logits.max(1)[1].squeeze(1).data
-            left_i = []
-            right_i = []
-            tracking_i = []
-            for tr_batch, buf_batch, st_batch, tracking_batch in (
-                    zip(tr_i, buffer, stack, tracking)):
-                if tr_batch == self.shift_id:
-                    st_batch.append(buf_batch.pop(0))
-                elif tr_batch == self.reduce_id:
-                    right_i.append(st_batch.pop())
-                    left_i.append(st_batch.pop())
-                    tracking_i.append(tracking_batch)
-                else:
-                    raise ValueError('Unknown transition ID')
-            if left_i:
-                left_h, left_c = bundle_state(left_i)
-                right_h, right_c = bundle_state(right_i)
-                tracking_i = torch.stack(tracking_i, dim=0)
-                parent_h, parent_c = self.reducer(
-                    left_h=left_h, left_c=left_c, right_h=right_h, right_c=right_c,
-                    tracking=tracking_i)
-                parent_i = unbundle_state(h=parent_h, c=parent_c)
-                for tr_batch, st_batch in zip(tr_i, stack):
-                    if tr_batch == self.reduce_id:
-                        st_batch.append(parent_i.pop(0))
-        root_h, _ = bundle_state([st_batch[-1] for st_batch in stack])
+                action_t = trans_logits_t.max(1)[1].squeeze(1)
+            step_result = self.step(
+                time=t, action=action_t, stack=stack,
+                buffer=buffer, buffer_cursor=buffer_cursor,
+                queue=queue, queue_cursor=queue_cursor, tracking=tracking)
+            stack, buffer_cursor, queue, queue_cursor = step_result
+        root = stack[:, -1, :]
+        root_h, _ = root.chunk(2, dim=1)
         trans_logits = torch.stack(trans_logits, dim=1)
         return root_h, trans_logits
